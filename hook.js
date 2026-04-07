@@ -28,96 +28,38 @@ HTMLVideoElement.prototype.play = function() {
     });
 };
 
-/* Web Audio API Interceptor for EQ and 360 Audio */
-const _realCreateMediaElementSource = AudioContext.prototype.createMediaElementSource || webkitAudioContext.prototype.createMediaElementSource;
-const _tptAudioNodes = new WeakMap();
 
-// Listen to custom events from content.js to update the EQ on the fly
-window.addEventListener('tpt-eq-update', (e) => {
-    const data = e.detail;
-    // Apply changes to all our active injected audio contexts
-    document.querySelectorAll('video').forEach(videoElement => {
-         const nodes = _tptAudioNodes.get(videoElement);
-         if (nodes) {
-             if (nodes.ctx.state === 'suspended') {
-                 nodes.ctx.resume().catch(()=>{});
-             }
-             // Map data setting to the nodes
-             if (data.bass !== undefined && nodes.bassNode) nodes.bassNode.gain.value = +data.bass;
-             if (data.mid !== undefined && nodes.midNode) nodes.midNode.gain.value = +data.mid;
-             if (data.treble !== undefined && nodes.trebleNode) nodes.trebleNode.gain.value = +data.treble;
-             
-             if (data.eq !== undefined) {
-                 // For presets like 'bbass', etc. If you want hardcoded values you'd map them here or in content.js
-             }
-         }
-    });
-});
+// TPT: Singleton AudioContext Hook to prevent TikTok from crashing when we also apply EQ
+const _realCreateMediaElementSource = window.AudioContext.prototype.createMediaElementSource || window.webkitAudioContext.prototype.createMediaElementSource;
+const _nodeCache = new WeakMap();
 
-AudioContext.prototype.createMediaElementSource = function(mediaElement) {
-    const sourceNode = _realCreateMediaElementSource.call(this, mediaElement);
-    
-    try {
-        const audioCtx = sourceNode.context;
-        const bassNode = audioCtx.createBiquadFilter();
-        bassNode.type = "lowshelf";
-        bassNode.frequency.value = 250;
-        bassNode.gain.value = 0;
-        
-        const midNode = audioCtx.createBiquadFilter();
-        midNode.type = "peaking";
-        midNode.frequency.value = 1000;
-        midNode.Q.value = 1;
-        midNode.gain.value = 0;
-
-        const trebleNode = audioCtx.createBiquadFilter();
-        trebleNode.type = "highshelf";
-        trebleNode.frequency.value = 6000;
-        trebleNode.gain.value = 0;
-        
-        const pannerNode = audioCtx.createStereoPanner ? audioCtx.createStereoPanner() : null;
-
-        // Create a custom shim for connect
-        const realConnect = sourceNode.connect;
-        
-        // We hijack the first connect call to inject our nodes in the middle
-        sourceNode.connect = function(destination, output=0, input=0) {
-            // Disconnect old chain
-            realConnect.call(this, bassNode);
-            bassNode.connect(midNode);
-            midNode.connect(trebleNode);
-            
-            let lastNode = trebleNode;
-            if (pannerNode) {
-                lastNode.connect(pannerNode);
-                lastNode = pannerNode;
-            }
-            
-            // Finally connect our last node to the REAL destination
-            lastNode.connect(destination, output, input);
-            
-            _tptAudioNodes.set(mediaElement, {
-                ctx: this.context,
-                sourceNode: this,
-                bassNode,
-                midNode,
-                trebleNode,
-                pannerNode,
-                isHooked: true
-            });
-            
-            // Revert connect so subsequent calls just behave normally (but we might break complex graphs)
-            // For now, return the destination for chaining
-            return destination;
+window.AudioContext.prototype.createMediaElementSource = function(mediaElement) {
+    if (_nodeCache.has(mediaElement)) {
+        const cached = _nodeCache.get(mediaElement);
+        // Return a proxy that acts like a MediaElementAudioSourceNode but routes to the existing one,
+        // or just return the existing one directly if it's from the same context (or even if it's not, to avoid native crash).
+        // Since TikTok's SDK just needs an object with `connect` and `disconnect` methods:
+        return {
+            context: this,
+            mediaElement: mediaElement,
+            connect: function(dest) { return cached.connect(dest); },
+            disconnect: function() { }
         };
-
-        mediaElement._tptAudioHooked = true;
-
-    } catch(e) {
-        console.error("TPT Audio Hook failed:", e);
     }
     
-    return sourceNode;
+    try {
+        const node = _realCreateMediaElementSource.call(this, mediaElement);
+        _nodeCache.set(mediaElement, node);
+        return node;
+    } catch (err) {
+        console.error("TPT Audio Hook fallback error:", err);
+        return {
+            context: this,
+            mediaElement: mediaElement,
+            connect: function(d) { return d; },
+            disconnect: function() {}
+        };
+    }
 };
-// Trigger custom event just in case content.js needs to know about this script
+
 window.dispatchEvent(new CustomEvent('tpt-hook-ready'));
