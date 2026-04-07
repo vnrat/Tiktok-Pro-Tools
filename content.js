@@ -813,7 +813,15 @@ function _applyAll() {
   }
   function _setSpeed(val) { cfg.speed  = +val; _applyAll(); chrome.storage.sync.set({ speed: cfg.speed }); }
 
-  new MutationObserver(_applyAll).observe(document.body, { childList: true, subtree: true });
+  let _applyAllTimeout = null;
+    const _debouncedApplyAll = () => {
+        if (_applyAllTimeout) return;
+        _applyAllTimeout = setTimeout(() => {
+            _applyAll();
+            _applyAllTimeout = null;
+        }, 500); // 500ms debounce to prevent CPU spikes and CAPTCHA flags
+    };
+    new MutationObserver(_debouncedApplyAll).observe(document.body, { childList: true, subtree: true });
   let _lastHref = location.href;
   setInterval(() => { if (location.href !== _lastHref) { _lastHref = location.href; setTimeout(_applyAll, 900); } }, 500);
 
